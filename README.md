@@ -70,3 +70,4 @@ python -m crunchyroll_recommender --data my_catalog.csv similar "Naruto"
 ```bash
 python -m pytest
 ```
+
