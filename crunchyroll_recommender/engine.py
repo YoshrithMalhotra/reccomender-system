@@ -45,6 +45,17 @@ def _split_pipe(value: str) -> list[str]:
     return [part.strip().lower() for part in str(value).split("|") if part.strip()]
 
 
+def profile_similarity(vectors, liked_idx: list[int], disliked_idx: list[int]) -> np.ndarray:
+    """Cosine similarity of every row of `vectors` to the mean of the liked rows,
+    pushed away from the mean of the disliked rows."""
+    profile = np.asarray(vectors[liked_idx].mean(axis=0)).reshape(1, -1)
+    if disliked_idx:
+        profile = profile - 0.5 * np.asarray(vectors[disliked_idx].mean(axis=0)).reshape(1, -1)
+    if not np.any(profile):
+        return np.zeros(vectors.shape[0])
+    return cosine_similarity(profile, vectors).ravel()
+
+
 class CrunchyrollRecommender:
     def __init__(self, catalog: pd.DataFrame, weights: Weights | None = None):
         missing = REQUIRED_COLUMNS - set(catalog.columns)
@@ -62,6 +73,13 @@ class CrunchyrollRecommender:
         self.catalog = df
         self.weights = weights or Weights()
         self._title_index = {t.lower(): i for i, t in enumerate(df["title"])}
+        # Alternative names (e.g. the romanised Japanese title) also resolve to the row.
+        if "alt_title" in df.columns:
+            for i, alt in enumerate(df["alt_title"]):
+                if isinstance(alt, str) and alt.strip():
+                    self._title_index.setdefault(alt.strip().lower(), i)
+        # Rows that may appear in results (e.g. only titles licensed by Crunchyroll).
+        self.candidate_mask = np.ones(len(df), dtype=bool)
         self._features = self._build_features(df)
         self._rating_score = self._normalise_ratings(df["rating"])
 
@@ -134,6 +152,10 @@ class CrunchyrollRecommender:
 
     # ------------------------------------------------------------------ ranking
 
+    def _similarity(self, liked_idx: list[int], disliked_idx: list[int]) -> np.ndarray:
+        """Similarity of every title to a taste profile built from liked/disliked rows."""
+        return profile_similarity(self._features, liked_idx, disliked_idx)
+
     def _rank(
         self,
         similarity: np.ndarray,
@@ -145,7 +167,7 @@ class CrunchyrollRecommender:
         w = self.weights.rating
         score = (1 - w) * similarity + w * self._rating_score
 
-        mask = np.ones(len(score), dtype=bool)
+        mask = self.candidate_mask.copy()
         mask[list(exclude)] = False
         if genres:
             wanted = {g.lower() for g in genres}
@@ -169,8 +191,7 @@ class CrunchyrollRecommender:
     ) -> pd.DataFrame:
         """Titles most similar to a single anime."""
         idx = self._idx(title)
-        sim = cosine_similarity(self._features[idx], self._features).ravel()
-        return self._rank(sim, {idx}, n, genres, min_rating)
+        return self._rank(self._similarity([idx], []), {idx}, n, genres, min_rating)
 
     def for_user(
         self,
@@ -186,10 +207,7 @@ class CrunchyrollRecommender:
         liked_idx = [self._idx(t) for t in liked]
         disliked_idx = [self._idx(t) for t in disliked or []]
 
-        profile = np.asarray(self._features[liked_idx].mean(axis=0))
-        if disliked_idx:
-            profile -= 0.5 * np.asarray(self._features[disliked_idx].mean(axis=0))
-        sim = cosine_similarity(profile, self._features).ravel()
+        sim = self._similarity(liked_idx, disliked_idx)
         return self._rank(sim, set(liked_idx) | set(disliked_idx), n, genres, min_rating)
 
     def top_rated(self, n: int = 10, genres: list[str] | None = None) -> pd.DataFrame:
